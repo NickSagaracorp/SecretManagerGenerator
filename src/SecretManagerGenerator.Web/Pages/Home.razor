@@ -1,0 +1,180 @@
+@page "/"
+@using SecretManagerGenerator.Core
+@inject IJSRuntime JS
+
+<PageTitle>Secret Manager Generator</PageTitle>
+
+<h1 class="h3">Secret Manager Generator</h1>
+<p class="text-muted">
+    Sube un web.config o app.config y obtén el JSON key/value para crear el secret en AWS Secrets Manager.
+    El archivo se procesa en tu navegador y no se envía a ningún servidor.
+</p>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <h2 class="h5 card-title">1. Archivo de configuración</h2>
+        <InputFile OnChange="LoadFile" accept=".config,.xml" class="form-control" />
+    </div>
+</div>
+
+@if (error is not null)
+{
+    <div class="alert alert-danger" role="alert">@error</div>
+}
+
+@if (result is not null)
+{
+    if (result.Warnings.Count > 0)
+    {
+        <div class="alert alert-warning" role="alert">
+            <ul class="mb-0">
+                @foreach (var warning in result.Warnings)
+                {
+                    <li>@warning</li>
+                }
+            </ul>
+        </div>
+    }
+
+    if (result.Entries.Count > 0)
+    {
+        <div class="card mb-4">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h2 class="h5 card-title mb-0">2. Keys detectadas (@result.Entries.Count)</h2>
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="showValues" @bind="showValues" />
+                        <label class="form-check-label" for="showValues">Mostrar valores</label>
+                    </div>
+                </div>
+                <table class="table table-sm align-middle mb-0">
+                    <tbody>
+                        @foreach (var group in result.Entries.GroupBy(e => e.Section).OrderBy(g => g.Key))
+                        {
+                            <tr class="table-light">
+                                <th colspan="2">@group.Key</th>
+                            </tr>
+                            @foreach (var entry in group)
+                            {
+                                <tr>
+                                    <td><code>@entry.SecretKey</code></td>
+                                    <td class="text-break font-monospace small">@(showValues ? entry.Value : Mask)</td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-body">
+                <h2 class="h5 card-title">3. Secret</h2>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label" for="application">Nombre de la aplicación</label>
+                        <input class="form-control" id="application" placeholder="MiApp" @bind="application" @bind:event="oninput" />
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label" for="environment">Environment</label>
+                        <input class="form-control" id="environment" placeholder="dev" @bind="environment" @bind:event="oninput" />
+                    </div>
+                </div>
+                @if (!CanGenerate)
+                {
+                    <p class="form-text mb-0 mt-3">Completa ambos campos para generar el JSON.</p>
+                }
+            </div>
+        </div>
+
+        if (CanGenerate)
+        {
+            var json = SecretJsonBuilder.Build(result.Entries);
+            var downloadName = SecretFileName.For(application, environment);
+
+            <div class="card mb-4">
+                <div class="card-body">
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                        <div>
+                            <h2 class="h5 card-title mb-1">4. JSON del secret</h2>
+                            <div class="small text-muted">
+                                Nombre sugerido del secret: <code>@application.Trim()/@environment.Trim()</code>
+                            </div>
+                        </div>
+                        <div class="d-flex gap-2">
+                            <button type="button" class="btn btn-outline-primary" @onclick="() => CopyAsync(json)">
+                                @(copied ? "Copiado" : "Copiar")
+                            </button>
+                            <button type="button" class="btn btn-primary" @onclick="() => DownloadAsync(downloadName, json)">
+                                Descargar @downloadName
+                            </button>
+                        </div>
+                    </div>
+                    <pre class="bg-light border rounded p-3 mb-0"><code>@(showValues ? json : MaskedJson())</code></pre>
+                </div>
+            </div>
+        }
+    }
+}
+
+@code {
+    private const long MaxFileSize = 2 * 1024 * 1024;
+    private const string Mask = "••••••••";
+
+    private ConfigParseResult? result;
+    private string? error;
+    private bool showValues;
+    private bool copied;
+    private string application = "";
+    private string environment = "";
+
+    private bool CanGenerate => !string.IsNullOrWhiteSpace(application) && !string.IsNullOrWhiteSpace(environment);
+
+    private async Task LoadFile(InputFileChangeEventArgs e)
+    {
+        result = null;
+        error = null;
+        copied = false;
+
+        if (e.File.Size > MaxFileSize)
+        {
+            error = "El archivo supera el máximo de 2 MB.";
+            return;
+        }
+
+        try
+        {
+            using var reader = new StreamReader(e.File.OpenReadStream(MaxFileSize));
+            result = ConfigParser.Parse(await reader.ReadToEndAsync());
+        }
+        catch (ConfigParseException ex)
+        {
+            error = ex.Message;
+        }
+    }
+
+    // Vista previa con los valores ocultos; copiar y descargar usan siempre el JSON real.
+    private string MaskedJson() =>
+        SecretJsonBuilder.Build(result!.Entries.Select(e => e with { Value = Mask }));
+
+    private async Task CopyAsync(string json)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", json);
+        }
+        catch (JSException)
+        {
+            error = "El navegador no permitió copiar al portapapeles. Usa el botón de descargar.";
+            return;
+        }
+
+        copied = true;
+        StateHasChanged();
+        await Task.Delay(2000);
+        copied = false;
+    }
+
+    private async Task DownloadAsync(string fileName, string json) =>
+        await JS.InvokeVoidAsync("secretManagerGenerator.downloadText", fileName, json);
+}
